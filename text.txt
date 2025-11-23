@@ -1,0 +1,26 @@
+git init .git
+hpn init .hpn os, sys, hashlib, zlib
+Tree và Commit
+
+hpn commit
+
+hpn init
+utils.py
+python3 main.py init
+
+mode (quyền hạn file), tên file, và mã SHA-1 dưới dạng binary 
+
+tree
+
+parent tree
+
+Commit (file text chứa metadata), bao gồm:
+- Tree: Hash của Root Tree mà chúng ta vừa tạo
+- Parent: hash của commit ngay trước đó (để tạo thành chuỗi (chain) xích lịch sử lại với nhau)
+- Author/Committer: Ai là người làm, vào thời gian nào
+- Message: Ghi chú cho commit 
+
+Directed Acyclic Graph (DAG)
+
+Branching | Merging
+checkout
