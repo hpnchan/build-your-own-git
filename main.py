@@ -5,6 +5,29 @@ import zlib
 import time
 # import struct
 
+HPN_DIR = ".hpn"
+OBJECTS_DIR = os.path.join(HPN_DIR, "objects")
+HEAD_FILE = os.path.join(HPN_DIR, "HEAD")
+
+def read_object(sha1):
+    path = os.path.join(OBJECTS_DIR, sha1[:2], sha1[2:])
+    if not os.path.exists(path):
+        return None, None
+    
+    with open(path, "rb") as f:
+        try:
+            raw = zlib.decompress(f.read())
+        except zlib.error:
+            return None, None
+    
+    spc_idx = raw.find(b' ')
+    nul_idx = raw.find(b'\0', spc_idx)
+    
+    obj_type = raw[:spc_idx].decode()
+    content = raw[nul_idx+1:]
+    
+    return obj_type, content
+
 def cmd_init():
     os.makedirs(".hpn", exist_ok=True)
     
@@ -36,7 +59,7 @@ def write_tree(directory="."):
     
     with os.scandir(directory) as it:
         for entry in it:
-            if entry.name.startswith(".") or entry.name == "__pycache__":
+            if entry.name.startswith(".") or entry.name == "__pycache__" or entry.name == "main.py":
                 continue
             
             if entry.is_file(follow_symlinks=False):
@@ -62,22 +85,27 @@ def write_tree(directory="."):
     
     return hash_object(tree_content, "tree")
 
-def get_current_head():
-    if os.path.exists(".hpn/HEAD"):
-        with open(".hpn/HEAD", "r") as f:
-            ref = f.read().strip().split(": ")[1]  #* refs/heads/master
+def get_current_head_info():
+    if not os.path.exists(HEAD_FILE):
+        return None, None
         
-        ref_path = os.path.join(".hpn", ref)
+    with open(HEAD_FILE, "r") as f:
+        content = f.read().strip()
+    
+    if content.startswith("ref: "):
+        ref = content.split(": ")[1]
+        ref_path = os.path.join(HPN_DIR, ref)
         if os.path.exists(ref_path):
             with open(ref_path, "r") as f:
-                return f.read().strip()
-    
-    return None
+                return ref, f.read().strip()
+        return ref, None
+    else:
+        return None, content
 
 def cmd_commit(message):
     tree_sha1 = write_tree()
     
-    parent = get_current_head()
+    parent = get_current_head_info()
     
     timestamp = int(time.time())
     timezone = "#0700"
@@ -108,34 +136,123 @@ def cmd_commit(message):
     print(f"[{ref.split('/')[-1]} {commit_sha1[:7]}] {message}")
 
 def cmd_log():
-    commit_sha1 = get_current_head()
-    
+    _, commit_sha1 = get_current_head_info()
     while commit_sha1:
-        path = os.path.join(".hpn", "objects", commit_sha1[:2], commit_sha1[2:])
-        with open(path, "rb") as f:
-            raw = zlib.decompress(f.read())
+        obj_type, content = read_object(commit_sha1) #* Dùng hàm read_object
+        if obj_type != "commit": break
+        
+        lines = content.decode().split("\n")
+        print(f"\033[33mcommit {commit_sha1}\033[0m")
+        parent = None
+        for line in lines:
+            if line.startswith("parent"): parent = line.split()[1]
+            elif line == "": 
+                print(f"\n  {lines[lines.index('')+1]}\n")
+                break
+        commit_sha1 = parent
+        
+
+def restore_tree(tree_sha1, base_path="."):
+    obj_type, content = read_object(tree_sha1)
+    if obj_type != "tree":
+        return
+
+    i = 0
+    while i < len(content):
+        #* Format: [mode] [space] [name] [\0] [sha1_bytes_20]
+        
+        nul_pos = content.find(b'\0', i)
+        
+        header = content[i:nul_pos].decode()
+        #! split(" ", 1)
+        mode, name = header.split(" ", 1)
+        
+        sha1_bytes = content[nul_pos+1 : nul_pos+21]
+        sha1 = sha1_bytes.hex()
+        
+        i = nul_pos + 21
+        
+        current_path = os.path.join(base_path, name)
+        
+        child_type, child_content = read_object(sha1)
+        
+        if child_type == "blob":
+            #* Force Checkout
+            with open(current_path, "wb") as f:
+                f.write(child_content)
+                print(f"Restored file: {current_path}")
+        elif child_type == "tree":
+            if not os.path.exists(current_path):
+                os.makedirs(current_path)
+            restore_tree(sha1, current_path)
+
+#* -b <tên nhánh>: tạo nhánh mới từ commit hiện tại
+#* <tên nhánh>: chuyển sang nhánh đã có
+#* <commit_hash>: quay về quá khứ 
+
+def get_tree_from_commit(commit_sha1):
+    obj_type, content = read_object(commit_sha1)
+    if obj_type != "commit":
+        return None
+    #* tree <tree_sha1>
+    return content.decode().split("\n")[0].split()[1]
+
+def cmd_checkout(args):
+    if not args:
+        print(f"Usage: checkout [-b] <branch/commit")
+        return
+    
+    target = args[0]
+    is_new_branch = False
+    
+    if target == "-b":
+        if len(args) < 2:
+            print("Error: Missing branch name")
+            return
+        is_new_branch = True
+        target = args[1]
+    
+    _, current_commit_sha1 = get_current_head_info()
+    
+    if is_new_branch:
+        if not current_commit_sha1:
+            print("Cannot create branch from empty history.")
+            return
+        
+        new_ref_path = os.path.join(HPN_DIR, "refs", "heads", target)
+        with open(new_ref_path, "w") as f:
+            f.write(current_commit_sha1)
+        
+        with open(HEAD_FILE, "w") as f:
+            f.write(f"ref: refs/heads/{target}]\n")
+        print(f"Switched to a new branch '{target}'")
+    else:
+        branch_path = os.path.join(HPN_DIR, "refs", "heads", target)
+        
+        #* Case 1: target - branch
+        if os.path.exists(branch_path):
+            with open(branch_path, "r") as f:
+                target_commit = f.read().strip()
             
-            header_end = raw.find(b'\0')
-            content = raw[header_end+1:].decode()
+            tree_sha1 = get_tree_from_commit(target_commit)
+            restore_tree(tree_sha1)
             
-            lines = content.split("\n")
-            print(f"\033[33mcommit {commit_sha1}\033[0m")
-            parent = None
-            
-            for line in lines:
-                if line.startswith("parent"):
-                    parent = line.split()[1]
-                elif line.startswith("author"):
-                    print(f"Author: {line[7:]}")
-                elif line.startswith("date"):
-                    pass
-                elif not line:
-                    break
-            
-            msg_index = lines.index("") + 1
-            print(f"\n  {lines[msg_index]}\n")
-            
-            commit_sha1 = parent
+            with open(HEAD_FILE, "w") as f:
+                f.write(f"ref: refs/heads/{target}\n")
+            print(f"Switched to branch '{target}'")
+        
+        #* Case 2: target - commit hash
+        else:
+            obj_type, _ = read_object(target)
+            if obj_type == "commit":
+                tree_sha1 = get_tree_from_commit(target)
+                restore_tree(tree_sha1)
+                
+                with open(HEAD_FILE, "w") as f:
+                    f.write(target)
+                print(f"Note: checking out '{target}'. You are in 'detached HEAD' state.")
+            else:
+                print(f"Error: '{target}' is not a valid branch or commit.")
 
 def main():
     args = sys.argv[1:]
@@ -161,6 +278,10 @@ def main():
         cmd_commit(args[1])
     elif command == "log":
         cmd_log()
+    elif command == "checkout":
+        if len(args) < 2:
+            return
+        cmd_checkout(args[1:])
     else:
         print(f"Unknown command: {command}")
 

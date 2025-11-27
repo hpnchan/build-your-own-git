@@ -19,8 +19,3 @@ Commit (file text chứa metadata), bao gồm:
 - Parent: hash của commit ngay trước đó (để tạo thành chuỗi (chain) xích lịch sử lại với nhau)
 - Author/Committer: Ai là người làm, vào thời gian nào
 - Message: Ghi chú cho commit 
-
-Directed Acyclic Graph (DAG)
-
-Branching | Merging
-checkout
